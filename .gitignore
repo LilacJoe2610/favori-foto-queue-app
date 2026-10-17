@@ -1,0 +1,4 @@
+app_data.json
+app_data.tmp
+__pycache__/
+*.py[cod]
