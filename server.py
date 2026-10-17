@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 import json
 import hashlib
+import os
 import secrets
 import socket
 import sys
@@ -13,7 +14,12 @@ import time
 from http.cookies import SimpleCookie
 
 ROOT = Path(__file__).resolve().parent
-DATA_FILE = ROOT / "app_data.json"
+DEMO_MODE = os.environ.get("DEMO_MODE", "").strip().lower() in ("1", "true", "yes")
+if DEMO_MODE:
+    # Keep a public demo completely separate from any local/customer records.
+    DATA_FILE = Path(os.environ.get("DEMO_DATA_FILE", "/tmp/favori_foto_demo_data.json"))
+else:
+    DATA_FILE = ROOT / "app_data.json"
 LOCK = threading.Lock()
 MANAGER_SESSIONS = {}
 SESSION_TTL = 12 * 60 * 60
@@ -130,7 +136,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.path == "/api/state":
             with LOCK:
                 data = read_data()
-                return self.reply(200, {key: data.get(key) for key in ("options", "nextGuest", "checkedIn", "activeGuest")})
+                response = {key: data.get(key) for key in ("options", "nextGuest", "checkedIn", "activeGuest")}
+                response["demoMode"] = DEMO_MODE
+                return self.reply(200, response)
         if path.path == "/api/manager/status":
             data = read_data()
             return self.reply(200, {"configured": bool(data.get("manager")), "authenticated": bool(self.manager_session())})
@@ -171,7 +179,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, response) if response else self.reply(404, {"error": "Không tìm thấy lượt khách này"})
         if path.path in ("/", "/guest"):
             try:
-                return self.reply(200, (ROOT / "index.html").read_bytes(), "text/html; charset=utf-8")
+                page = (ROOT / "index.html").read_bytes()
+                if DEMO_MODE:
+                    notice = ("<div role='note' style='padding:10px 16px;background:#fff4d9;color:#745b1f;"
+                              "text-align:center;font:600 13px system-ui'>Bản demo công khai — vui lòng chỉ dùng dữ liệu giả. "
+                              "Dữ liệu có thể được đặt lại.</div>").encode()
+                    page = page.replace(b"<body>", b"<body>" + notice, 1)
+                return self.reply(200, page, "text/html; charset=utf-8")
             except OSError:
                 return self.reply(500, "Không tìm thấy index.html", "text/plain; charset=utf-8")
         if path.path == "/health":
@@ -226,7 +240,8 @@ class Handler(BaseHTTPRequestHandler):
                         return self.reply(401, {"error": "Mật khẩu không đúng"})
             token = secrets.token_urlsafe(32)
             MANAGER_SESSIONS[token] = {"role": "manager", "expires": time.time() + SESSION_TTL}
-            return self.reply(200, {"ok": True, "role": "manager"}, extra_headers={"Set-Cookie": f"favori_manager={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={SESSION_TTL}"})
+            secure_cookie = "; Secure" if self.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip() == "https" else ""
+            return self.reply(200, {"ok": True, "role": "manager"}, extra_headers={"Set-Cookie": f"favori_manager={token}; HttpOnly; SameSite=Lax{secure_cookie}; Path=/; Max-Age={SESSION_TTL}"})
         if self.path == "/api/manager/logout":
             cookie = SimpleCookie(self.headers.get("Cookie", ""))
             token = cookie.get("favori_manager")
@@ -271,8 +286,12 @@ class Handler(BaseHTTPRequestHandler):
                 data = read_data()
                 data.setdefault("guestLinks", {})[token] = guest
                 write_data(data)
-            host = self.headers.get("Host", "localhost:8000")
-            return self.reply(201, {"token": token, "url": f"http://{host}/guest?token={token}"})
+            base_url = os.environ.get("PUBLIC_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+            if not base_url:
+                host = self.headers.get("Host", "localhost:8000")
+                scheme = self.headers.get("X-Forwarded-Proto", "http").split(",", 1)[0].strip()
+                base_url = f"{scheme}://{host}"
+            return self.reply(201, {"token": token, "url": f"{base_url.rstrip('/')}/guest?token={token}"})
         if self.path.startswith("/api/guest/"):
             token, _, action = self.path[len("/api/guest/"):].partition("/")
             with LOCK:
@@ -334,7 +353,7 @@ def lan_addresses():
 
 
 if __name__ == "__main__":
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
+    port = int(os.environ.get("PORT", sys.argv[1] if len(sys.argv) > 1 else "8000"))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print("Favori Foto is running:")
     print(f"  This computer: http://localhost:{port}")
