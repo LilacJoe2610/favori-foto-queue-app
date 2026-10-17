@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: favori-foto-demo
+    runtime: python
+    plan: free
+    buildCommand: echo "No dependencies to install"
+    startCommand: python server.py
+    envVars:
+      - key: DEMO_MODE
+        value: "true"
